@@ -1,1 +1,1 @@
-{"state":"done","custom":{"target":128,"minedBlocks":1},"program":"cobbleMiner.lua","message":"inventory full. stopping..."}
+{"message":"target reached. stopping...","state":"done","program":"cobbleMiner.lua","custom":{"target":128,"minedBlocks":128}}

@@ -124,56 +124,6 @@ function M.autosize(container, padW, padH)
 end
 
 
-----------------------------------------------------------------
--- Windowpacking
-----------------------------------------------------------------
-
-
-function M.windowPacking(container, windows, paddingX, paddingY)
-    paddingX = paddingX or 1
-    paddingY = paddingY or 1
-
-    local contW, contH = container:getSize()
-
-    -- if width is 0 for some reason, fall back to parent width
-    if contW == 0 then
-        local parent = container:getParent()
-        if parent then
-            contW, contH = parent:getSize()
-        end
-    end
-
-    local x = 1
-    local y = 1
-    local rowMaxH = 0
-
-    for _, win in ipairs(windows) do
-        local w, h = win:getSize()
-
-        -- wrap to next row if this window would overflow to the right
-        if x + w - 1 > contW then
-            x = 1
-            y = y + rowMaxH + paddingY
-            rowMaxH = 0
-        end
-
-        win:setPosition(x, y)
-
-        if h > rowMaxH then
-            rowMaxH = h
-        end
-
-        x = x + w + paddingX
-    end
-
-    -- required height to fit all rows
-    local neededHeight = y + rowMaxH - 1
-
-    local _, curH = container:getSize()
-    if neededHeight > curH then
-        container:setSize(contW, neededHeight)
-    end
-end
 
 
 
@@ -221,8 +171,51 @@ testdata = {
     },
 }
 
-function M.findOpenSpotInFrame(playfield, window)
-    return 1, 1
+
+----- finds a open spot to put a new window
+-- OBS! THIS IS DOGSHIT, NEEDS TO BE REWRITTEN WITH MATH
+-- also im starting to suspect that playfield is briefly 1 1 big wich causes wierdness
+-- idea: create a invisible frame with the same dimentions as the window. that way you can run :aligntRight and get its cords. also you could run :isOutsideBoundingbox or :overlap (real function names needs to be found)
+
+function M.findOpenSpotInFrame(playfield, window)   
+    -- ensures data in is not shit
+    if #(playfield:getChildren() or {}) == 1 then return 1, 1 end
+    local playWidth, playHeight = playfield:getSize()
+    if not playWidth or not playHeight then return 1, 1 end
+    local winWidth, winHeight = window:getSize()
+    if not winWidth or not winHeight then winWidth, winHeight = 8, 3 end
+    
+    -- sees if any 
+    local x, y = 1, 1
+    local spacing = 1 
+    for _, currentChild in ipairs(playfield:getChildren() or {}) do
+        if currentChild ~= window and currentChild._isCustomWindow then
+            local cCx, cCy = currentChild:getPosition()
+            local cCwidth, cCheight = currentChild:getSize()
+            if cCx + cCwidth + spacing > x then
+                x = cCx + cCwidth + spacing
+            end
+        end
+    end
+    --sleep(0.1)
+    if x + winWidth > playWidth then
+        x = 1
+
+        local maxY = 1
+        for _, currentChild in ipairs(playfield:getChildren() or {}) do
+            if currentChild ~= window and currentChild._isCustomWindow then
+                local _, cCy = currentChild:getPosition()
+                local _, cCheight = currentChild:getSize()
+                maxY = math.max(maxY, cCy + cCheight + spacing)
+            end
+        end
+        y = maxY
+    else
+        y = 1
+    end
+
+    return x, y
+
     --[[
     i just realised how i want this to work:
     if playfield has no child: return 1 1
