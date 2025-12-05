@@ -1,0 +1,427 @@
+-- veinminer.lua
+-- Mines all connected blocks that match either:
+--   * the block currently in front (name mode), or
+--   * a given block tag (tag mode, default "#c:ores")
+--
+-- Features:
+--   * 32-block radius limit from origin
+--   * If radius limit is hit, mining aborts and turtle returns to origin
+--   * Scan cache to reduce repeated turtle.inspect calls
+--   * Flags:
+--       -t [tag]   : enable tag mode, optional tag (default "#c:ores")
+--       -s [mode]  : start direction: "f" (forward), "u" (up), "d" (down)
+--
+-- Assumptions:
+--   * Turtle starts at origin, facing arbitrary direction
+--   * Fuel is handled elsewhere
+
+-------------------------------------------------
+-- Args / flags
+-------------------------------------------------
+
+local args = {...}
+
+local useTagMode = false
+local targetTag  = "#c:ores"  -- default tag
+local startMode  = nil        -- "f", "u", or "d"
+
+do
+  local i = 1
+  while i <= #args do
+    local a = args[i]
+    if a == "-t" then
+      useTagMode = true
+      -- Next arg is optional tag (if present and not another flag)
+      if args[i + 1] and not args[i + 1]:match("^%-") then
+        targetTag = args[i + 1]
+        i = i + 1
+      end
+    elseif a == "-s" then
+      if args[i + 1] then
+        startMode = args[i + 1]:sub(1, 1):lower()
+        i = i + 1
+      end
+    end
+    i = i + 1
+  end
+end
+
+-------------------------------------------------
+-- Position & movement tracking
+-------------------------------------------------
+
+-- Relative coordinates from origin (starting point)
+local x, y, z = 0, 0, 0
+
+-- Direction the turtle is facing:
+-- 0 = +Z, 1 = +X, 2 = -Z, 3 = -X
+local dir = 0
+
+local MAX_DIST    = 32
+local MAX_DIST_SQ = MAX_DIST * MAX_DIST
+
+-- Abort flag: set when distance limit is reached
+local abort = false
+
+-- Cache of scanned blocks:
+-- key = "x,y,z", value = false  -> scanned and definitely NOT target block
+local checked = {}
+
+local function coordKey(cx, cy, cz)
+  return cx .. "," .. cy .. "," .. cz
+end
+
+local function distSq(nx, ny, nz)
+  return nx * nx + ny * ny + nz * nz
+end
+
+local function withinLimit(nx, ny, nz)
+  return distSq(nx, ny, nz) <= MAX_DIST_SQ
+end
+
+local function markNonTarget(cx, cy, cz)
+  checked[coordKey(cx, cy, cz)] = false
+end
+
+local function forwardDelta()
+  if dir == 0 then
+    return 0, 0, 1
+  elseif dir == 1 then
+    return 1, 0, 0
+  elseif dir == 2 then
+    return 0, 0, -1
+  else -- dir == 3
+    return -1, 0, 0
+  end
+end
+
+local function moveForward()
+  local dx, dy, dz = forwardDelta()
+  local nx, ny, nz = x + dx, y + dy, z + dz
+
+  if not withinLimit(nx, ny, nz) then
+    abort = true
+    return false
+  end
+
+  if turtle.forward() then
+    x, y, z = nx, ny, nz
+    -- Standing here: it's now air (we dug target first), so never inspect as target again
+    markNonTarget(x, y, z)
+    return true
+  end
+  return false
+end
+
+local function moveBack()
+  local dx, dy, dz = forwardDelta()
+  local nx, ny, nz = x - dx, y - dy, z - dz
+
+  if not withinLimit(nx, ny, nz) then
+    abort = true
+    return false
+  end
+
+  if turtle.back() then
+    x, y, z = nx, ny, nz
+    -- Back at a place we've already been; mark as non-target
+    markNonTarget(x, y, z)
+    return true
+  end
+  return false
+end
+
+local function moveUp()
+  local nx, ny, nz = x, y + 1, z
+  if not withinLimit(nx, ny, nz) then
+    abort = true
+    return false
+  end
+  if turtle.up() then
+    x, y, z = nx, ny, nz
+    markNonTarget(x, y, z)
+    return true
+  end
+  return false
+end
+
+local function moveDown()
+  local nx, ny, nz = x, y - 1, z
+  if not withinLimit(nx, ny, nz) then
+    abort = true
+    return false
+  end
+  if turtle.down() then
+    x, y, z = nx, ny, nz
+    markNonTarget(x, y, z)
+    return true
+  end
+  return false
+end
+
+local function turnLeft()
+  turtle.turnLeft()
+  dir = (dir + 3) % 4
+end
+
+local function turnRight()
+  turtle.turnRight()
+  dir = (dir + 1) % 4
+end
+
+-------------------------------------------------
+-- Target check: by name or by tag
+-------------------------------------------------
+
+local targetName = nil -- used only in name mode
+
+local function isTarget(data)
+  if not data then return false end
+
+  if useTagMode then
+    if not data.tags then return false end
+    -- Exact tag match
+    if data.tags[targetTag] then return true end
+    -- Be lenient: allow tag without leading '#'
+    local short = targetTag:gsub("^#", "")
+    if data.tags[short] then return true end
+    return false
+  else
+    return data.name == targetName
+  end
+end
+
+-------------------------------------------------
+-- Direction helpers (inspect/dig/move)
+-------------------------------------------------
+
+local function inspectDir(mode)
+  if mode == "u" then
+    return turtle.inspectUp()
+  elseif mode == "d" then
+    return turtle.inspectDown()
+  else -- "f"
+    return turtle.inspect()
+  end
+end
+
+local function digDir(mode)
+  if mode == "u" then
+    return turtle.digUp()
+  elseif mode == "d" then
+    return turtle.digDown()
+  else -- "f"
+    return turtle.dig()
+  end
+end
+
+local function moveDir(mode)
+  if mode == "u" then
+    return moveUp()
+  elseif mode == "d" then
+    return moveDown()
+  else -- "f"
+    return moveForward()
+  end
+end
+
+local function neighborCoords(mode)
+  if mode == "u" then
+    return x, y + 1, z
+  elseif mode == "d" then
+    return x, y - 1, z
+  else -- "f"
+    local dx, dy, dz = forwardDelta()
+    return x + dx, y + dy, z + dz
+  end
+end
+
+-------------------------------------------------
+-- Vein mining logic (DFS with radius + cache)
+-------------------------------------------------
+
+local function mineVein()
+  if abort then return end
+
+  -------------------------------------------------
+  -- 1) Check UP
+  -------------------------------------------------
+  do
+    if abort then return end
+
+    local nx, ny, nz = x, y + 1, z
+    if not withinLimit(nx, ny, nz) then
+      abort = true
+      return
+    end
+
+    local key = coordKey(nx, ny, nz)
+    if checked[key] ~= false then
+      local ok, data = turtle.inspectUp()
+      if ok and isTarget(data) then
+        turtle.digUp()
+        if moveUp() then
+          mineVein()
+          moveDown()  -- backtrack
+        end
+      else
+        checked[key] = false
+      end
+    end
+  end
+
+  -------------------------------------------------
+  -- 2) Check DOWN
+  -------------------------------------------------
+  do
+    if abort then return end
+
+    local nx, ny, nz = x, y - 1, z
+    if not withinLimit(nx, ny, nz) then
+      abort = true
+      return
+    end
+
+    local key = coordKey(nx, ny, nz)
+    if checked[key] ~= false then
+      local ok, data = turtle.inspectDown()
+      if ok and isTarget(data) then
+        turtle.digDown()
+        if moveDown() then
+          mineVein()
+          moveUp()    -- backtrack
+        end
+      else
+        checked[key] = false
+      end
+    end
+  end
+
+  -------------------------------------------------
+  -- 3) Check all 4 horizontal directions
+  -------------------------------------------------
+  for i = 1, 4 do
+    if abort then return end
+
+    local dx, dy, dz = forwardDelta()
+    local nx, ny, nz = x + dx, y + dy, z + dz
+
+    if not withinLimit(nx, ny, nz) then
+      abort = true
+      return
+    end
+
+    local key = coordKey(nx, ny, nz)
+    if checked[key] ~= false then
+      local ok, data = turtle.inspect()
+      if ok and isTarget(data) then
+        turtle.dig()
+        if moveForward() then
+          mineVein()
+          moveBack()  -- backtrack
+        end
+      else
+        checked[key] = false
+      end
+    end
+
+    turnLeft() -- after 4 turns, facing is restored
+  end
+end
+
+-------------------------------------------------
+-- Find starting block and enter the vein
+-------------------------------------------------
+
+local function startFromDirection(mode)
+  -- Name mode: determine target from first block
+  if not useTagMode then
+    local ok, data = inspectDir(mode)
+    if not ok or not data or not data.name then
+      print("No valid block in direction '" .. mode .. "'.")
+      return false
+    end
+    targetName = data.name
+    print("Vein mining block type: " .. targetName)
+    digDir(mode)
+    if not moveDir(mode) then
+      print("Failed to move into target block.")
+      return false
+    end
+    return true
+  end
+
+  -- Tag mode: targetTag already known, just verify it matches
+  local ok, data = inspectDir(mode)
+  if not ok or not isTarget(data) then
+    print("No block with tag '" .. targetTag .. "' in direction '" .. mode .. "'.")
+    return false
+  end
+
+  print("Vein mining by tag: " .. targetTag)
+  digDir(mode)
+  if not moveDir(mode) then
+    print("Failed to move into tagged block.")
+    return false
+  end
+  return true
+end
+
+local function findStartBlock()
+  if useTagMode and not startMode then
+    -- Tag mode, no -s: search f, u, d in that order
+    local order = {"f", "u", "d"}
+    for _, mode in ipairs(order) do
+      local ok, data = inspectDir(mode)
+      if ok and isTarget(data) then
+        print("Found tagged block (" .. targetTag .. ") " ..
+              (mode == "f" and "in front" or mode == "u" and "above" or "below") .. ".")
+        digDir(mode)
+        if not moveDir(mode) then
+          print("Failed to move into tagged block.")
+          return false
+        end
+        return true
+      end
+    end
+    print("No block with tag '" .. targetTag .. "' in forward/up/down.")
+    return false
+  else
+    -- Name mode, or tag mode with explicit -s
+    local mode = startMode or "f"
+    return startFromDirection(mode)
+  end
+end
+
+-------------------------------------------------
+-- Entry point
+-------------------------------------------------
+
+local function main()
+  if useTagMode then
+    print("Mode: tag")
+    print("Target tag: " .. targetTag)
+  else
+    print("Mode: name (block in chosen direction)")
+  end
+  print("Distance limit: " .. MAX_DIST .. " blocks from origin")
+
+  if not findStartBlock() then
+    return
+  end
+
+  -- Now we are 1 step inside the vein
+  mineVein()
+
+  -- Return to origin (we started at (0,0,0), moved once into the vein,
+  -- so we just need to move back once)
+  moveBack()
+
+  if abort then
+    print("Stopped: distance limit reached. Returned to origin.")
+  else
+    print("Done: full vein mined (within radius). Returned to origin.")
+  end
+end
+
+main()
